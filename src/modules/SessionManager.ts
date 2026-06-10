@@ -327,14 +327,23 @@ export class SessionManager {
 
       let question = '';
       let answer = '';
+      const citationIds: string[] = feedback.citations || [];
 
-      for (const msg of session.messages) {
+      for (let i = 0; i < session.messages.length; i++) {
+        const msg = session.messages[i];
         if (msg.questionId === feedback.questionId) {
           if (msg.role === 'user') {
             question = msg.content;
+            if (i + 1 < session.messages.length && session.messages[i + 1].questionId === feedback.questionId) {
+              answer = session.messages[i + 1].content;
+            }
           } else if (msg.role === 'assistant') {
             answer = msg.content;
+            if (i > 0 && session.messages[i - 1].questionId === feedback.questionId) {
+              question = session.messages[i - 1].content;
+            }
           }
+          break;
         }
       }
 
@@ -347,7 +356,7 @@ export class SessionManager {
         rating: feedback.rating,
         helpful: feedback.helpful,
         comment: feedback.comment,
-        citations: feedback.citations || [],
+        citations: citationIds,
         createdAt: new Date(feedback.createdAt).toISOString(),
       });
     }

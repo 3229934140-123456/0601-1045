@@ -6,6 +6,7 @@ import {
   UserFeedback,
   Session,
   LowScoreAnswerExport,
+  StorageAdapter,
 } from '../types';
 import { generateId, formatDateKey } from '../utils';
 
@@ -24,6 +25,11 @@ export type DimensionKey = 'type' | 'tenantId' | 'userId' | 'sessionId' | 'date'
 
 export class UsageTracker {
   private records: UsageRecord[] = [];
+  private storage?: StorageAdapter;
+
+  constructor(storage?: StorageAdapter) {
+    this.storage = storage;
+  }
 
   record(
     type: UsageType,
@@ -51,6 +57,7 @@ export class UsageTracker {
     };
 
     this.records.push(record);
+    this.save();
     return record;
   }
 
@@ -328,5 +335,20 @@ export class UsageTracker {
 
   getAllRecords(): UsageRecord[] {
     return [...this.records].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  async initialize(tenantId?: string): Promise<void> {
+    if (!this.storage?.loadUsage) return;
+    const loaded = await this.storage.loadUsage(tenantId);
+    this.records = loaded;
+  }
+
+  private async save(): Promise<void> {
+    if (!this.storage?.saveUsage) return;
+    try {
+      await this.storage.saveUsage(this.records);
+    } catch (_e) {
+      // persist failure is non-critical
+    }
   }
 }

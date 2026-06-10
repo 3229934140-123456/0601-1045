@@ -57,9 +57,9 @@ export class AIPlatform {
     this.defaultUserId = config.defaultUserId;
 
     this.sensitive = new SensitiveWordFilter(config.sensitiveWords);
-    this.document = new DocumentManager();
+    this.document = new DocumentManager(config.storage, config.tenantId);
     this.question = new QuestionProcessor();
-    this.usage = new UsageTracker();
+    this.usage = new UsageTracker(config.storage);
     this.session = new SessionManager(
       this.question,
       config
@@ -72,12 +72,21 @@ export class AIPlatform {
         noAnswerMessage: config.noAnswerMessage,
         blockedMessage: config.blockedMessage,
         scopeEmptyMessage: config.scopeEmptyMessage,
+        retriever: config.retriever,
+        llm: config.llm,
+        enableStepTracing: config.enableStepTracing,
       }
     );
 
     if (config.similarityThreshold !== undefined) {
       this.question.setDefaultThreshold(config.similarityThreshold);
     }
+  }
+
+  async initialize(): Promise<void> {
+    await this.document.initialize();
+    await this.session.initialize(this.defaultTenantId, this.defaultUserId);
+    await this.usage.initialize(this.defaultTenantId);
   }
 
   setDefaultUserId(userId: string): void {
@@ -88,17 +97,27 @@ export class AIPlatform {
     this.defaultTenantId = tenantId;
   }
 
+  private resolveUserId(sessionId?: string): string | undefined {
+    if (sessionId) {
+      const session = this.session.getSession(sessionId);
+      if (session?.userId) return session.userId;
+    }
+    return this.defaultUserId;
+  }
+
   private recordUsage(type: UsageType, extra: {
     tenantId?: string;
+    userId?: string;
     sessionId?: string;
     metadata?: Record<string, any>;
     tokens?: number;
     duration?: number;
     success?: boolean;
   } = {}): void {
+    const userId = extra.userId || this.resolveUserId(extra.sessionId);
     this.usage.record(type, {
       tenantId: extra.tenantId || this.defaultTenantId,
-      userId: this.defaultUserId,
+      userId,
       sessionId: extra.sessionId,
       metadata: extra.metadata,
       tokens: extra.tokens,
@@ -109,7 +128,7 @@ export class AIPlatform {
 
   // ==================== 0. 租户 & 标签管理 ====================
 
-  addTenant(name: string, description?: string): Tenant | null {
+  addTenant(name: string, description?: string): Tenant {
     return this.document.addTenant(name, description);
   }
 
@@ -243,17 +262,34 @@ export class AIPlatform {
   async generateAnswer(request: AnswerGenerateRequest): Promise<AnswerGenerateResult> {
     let sessionId = request.sessionId;
     let tenantId = request.scope?.tenantId || this.defaultTenantId;
+    let effectiveScope = request.scope;
+
+    if (sessionId && this.session.hasSession(sessionId)) {
+      const existingSession = this.session.getSession(sessionId);
+      if (!effectiveScope && existingSession?.scope) {
+        effectiveScope = existingSession.scope;
+      }
+      if (!tenantId && existingSession?.tenantId) {
+        tenantId = existingSession.tenantId;
+      }
+    }
 
     if (!sessionId || !this.session.hasSession(sessionId)) {
       const session = this.session.createSession({
         tenantId,
         userId: this.defaultUserId,
-        categoryId: request.scope?.categoryIds?.[0],
-        scope: request.scope,
+        categoryId: effectiveScope?.categoryIds?.[0],
+        scope: effectiveScope,
       });
       sessionId = session.id;
       request = { ...request, sessionId };
     }
+
+    if (effectiveScope && !request.scope) {
+      request = { ...request, scope: effectiveScope };
+    }
+
+    const originalQuestion = request.question;
 
     if (request.useHistory !== false) {
       const contextText = this.session.getContextText(sessionId, 1500);
@@ -267,11 +303,18 @@ export class AIPlatform {
       }
     }
 
-    this.session.addMessage(sessionId, 'user', request.question);
+    this.session.addMessage(sessionId, 'user', originalQuestion);
 
     const startTime = Date.now();
     const result = await this.answer.generate(request);
     const duration = Date.now() - startTime;
+
+    const userMsg = this.session.getSession(sessionId)?.messages.find(
+      m => m.role === 'user' && !m.questionId && m.timestamp >= startTime - 1
+    );
+    if (userMsg) {
+      userMsg.questionId = result.questionId;
+    }
 
     this.session.addMessage(sessionId, 'assistant', result.answer, result.citations, result.questionId, result.status);
 
@@ -353,12 +396,13 @@ export class AIPlatform {
   }
 
   submitFeedback(request: FeedbackSubmitRequest): UserFeedback | null {
-    const result = this.session.submitFeedback(request, this.defaultUserId);
+    const result = this.session.submitFeedback(request);
     if (result) {
       const session = this.session.getSession(request.sessionId);
       this.recordUsage('feedback_submit', {
         tenantId: session?.tenantId,
         sessionId: request.sessionId,
+        userId: session?.userId,
         metadata: { rating: request.rating, helpful: request.helpful },
         success: true,
       });
@@ -374,8 +418,8 @@ export class AIPlatform {
     return this.session.getAverageRating(sessionId);
   }
 
-  addFAQ(question: string, answer: string, category?: string): FAQItem {
-    return this.session.addFAQ(question, answer, category);
+  addFAQ(question: string, answer: string, tenantIdOrCategory?: string, category?: string): FAQItem {
+    return this.session.addFAQ(question, answer, tenantIdOrCategory, category);
   }
 
   removeFAQ(faqId: string): boolean {
@@ -405,22 +449,10 @@ export class AIPlatform {
   // ==================== 用量查询 ====================
 
   queryUsage(request: UsageQueryRequest = {}): UsageRecord[] {
-    if (!request.userId && this.defaultUserId) {
-      request = { ...request, userId: this.defaultUserId };
-    }
-    if (!request.tenantId && this.defaultTenantId) {
-      request = { ...request, tenantId: this.defaultTenantId };
-    }
     return this.usage.query(request);
   }
 
   getUsageSummary(request: UsageQueryRequest = {}): UsageSummary {
-    if (!request.userId && this.defaultUserId) {
-      request = { ...request, userId: this.defaultUserId };
-    }
-    if (!request.tenantId && this.defaultTenantId) {
-      request = { ...request, tenantId: this.defaultTenantId };
-    }
     return this.usage.getSummary(request);
   }
 
@@ -451,12 +483,6 @@ export class AIPlatform {
     dimensions: DimensionKey[],
     request: UsageQueryRequest = {}
   ): Record<string, number> {
-    if (!request.userId && this.defaultUserId) {
-      request = { ...request, userId: this.defaultUserId };
-    }
-    if (!request.tenantId && this.defaultTenantId) {
-      request = { ...request, tenantId: this.defaultTenantId };
-    }
     return this.usage.getCountByDimensions(dimensions, request);
   }
 

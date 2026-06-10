@@ -40,7 +40,7 @@ export class DocumentManager {
   }
 
   private initDefaultTenant(): void {
-    if (!this.tenants.has(this.defaultTenantId)) return;
+    if (this.tenants.has(this.defaultTenantId)) return;
 
     const defaultTenant: Tenant = {
       id: this.defaultTenantId,
@@ -126,8 +126,8 @@ export class DocumentManager {
       if (this.storage.saveChunks) {
         await this.storage.saveChunks(Array.from(this.chunks.values()));
       }
-    } catch (e) {
-      console.warn('Storage persist failed:', e);
+    } catch (_e) {
+      // persist failure is non-critical
     }
   }
 

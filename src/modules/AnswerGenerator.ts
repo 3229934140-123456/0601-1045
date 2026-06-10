@@ -27,6 +27,7 @@ export class AnswerGenerator {
   private blockedMessage: string;
   private scopeEmptyMessage: string;
   private enableStepTracing: boolean;
+  private useDocumentManagerSearch: boolean;
 
   constructor(
     documentManager: DocumentManager,
@@ -46,6 +47,7 @@ export class AnswerGenerator {
     this.sensitiveFilter = sensitiveFilter;
     this.retriever = options?.retriever || new LocalKeywordRetriever();
     this.llm = options?.llm || new RuleBasedLLM();
+    this.useDocumentManagerSearch = !options?.retriever;
     this.noAnswerMessage = options?.noAnswerMessage || '抱歉，根据现有知识库内容，暂时无法找到与您问题相关的答案。建议您尝试更换关键词，或查看其他分类的内容。';
     this.blockedMessage = options?.blockedMessage || '您的问题包含敏感内容，请修改后重新提问。';
     this.scopeEmptyMessage = options?.scopeEmptyMessage || '抱歉，您指定的知识范围内暂无相关内容。';
@@ -54,10 +56,20 @@ export class AnswerGenerator {
 
   setRetriever(retriever: Retriever): void {
     this.retriever = retriever;
+    this.useDocumentManagerSearch = false;
+  }
+
+  resetToDefaultRetriever(): void {
+    this.retriever = new LocalKeywordRetriever();
+    this.useDocumentManagerSearch = true;
   }
 
   setLLM(llm: LLM): void {
     this.llm = llm;
+  }
+
+  resetToDefaultLLM(): void {
+    this.llm = new RuleBasedLLM();
   }
 
   setEnableStepTracing(enable: boolean): void {
@@ -149,7 +161,7 @@ export class AnswerGenerator {
             chunksFound: 0,
             chunksUsed: 0,
             retrievalTime: 0,
-            method: this.retriever.name,
+            method: this.useDocumentManagerSearch ? 'document_manager' : this.retriever.name,
             scopeEmpty: true,
             scopeDetails: {
               tenantId: effectiveScope.tenantId,
@@ -226,22 +238,49 @@ export class AnswerGenerator {
         topK: request.maxCitations || 10,
       });
 
-      const searchQueries = [request.question, rewriteResult.rewritten, ...rewriteResult.variants.slice(0, 2)];
       const allCitations: Map<string, { chunk: CitationChunk; score: number }> = new Map();
       let totalRetrievalTime = 0;
+      let retrievalMethod = 'document_manager';
 
-      for (const query of searchQueries) {
-        const retrieveResult: RetrieveResult = await this.retriever.retrieve({
-          query,
-          scope: effectiveScope,
-          topK: request.maxCitations || 10,
-        });
-        totalRetrievalTime += retrieveResult.retrievalTime;
+      if (this.useDocumentManagerSearch) {
+        const dmStartTime = Date.now();
+        const searchQueries = [request.question, rewriteResult.rewritten, ...rewriteResult.variants.slice(0, 2)];
+        for (const query of searchQueries) {
+          const results = this.documentManager.searchChunks(query, effectiveScope, request.maxCitations || 10);
+          for (const item of results) {
+            const cit: CitationChunk = {
+              id: item.chunk.id,
+              content: item.chunk.content,
+              categoryId: item.chunk.categoryId,
+              tenantId: item.chunk.tenantId,
+              tags: item.chunk.tags,
+              relevance: item.score,
+              metadata: item.chunk.metadata,
+            };
+            const existing = allCitations.get(cit.id);
+            if (!existing || existing.score < cit.relevance) {
+              allCitations.set(cit.id, { chunk: cit, score: cit.relevance });
+            }
+          }
+        }
+        totalRetrievalTime = Date.now() - dmStartTime;
+        retrievalMethod = 'document_manager';
+      } else {
+        const searchQueries = [request.question, rewriteResult.rewritten, ...rewriteResult.variants.slice(0, 2)];
+        for (const query of searchQueries) {
+          const retrieveResult: RetrieveResult = await this.retriever.retrieve({
+            query,
+            scope: effectiveScope,
+            topK: request.maxCitations || 10,
+          });
+          totalRetrievalTime += retrieveResult.retrievalTime;
+          retrievalMethod = retrieveResult.retrievalMethod || this.retriever.name;
 
-        for (const cit of retrieveResult.chunks) {
-          const existing = allCitations.get(cit.id);
-          if (!existing || existing.score < cit.relevance) {
-            allCitations.set(cit.id, { chunk: cit, score: cit.relevance });
+          for (const cit of retrieveResult.chunks) {
+            const existing = allCitations.get(cit.id);
+            if (!existing || existing.score < cit.relevance) {
+              allCitations.set(cit.id, { chunk: cit, score: cit.relevance });
+            }
           }
         }
       }
@@ -276,7 +315,7 @@ export class AnswerGenerator {
             chunksFound: allCitations.size,
             chunksUsed: 0,
             retrievalTime: totalRetrievalTime,
-            method: this.retriever.name,
+            method: retrievalMethod,
             scopeDetails: {
               tenantId: effectiveScope.tenantId,
               categoryIds: effectiveScope.categoryIds,
@@ -330,10 +369,10 @@ export class AnswerGenerator {
         relatedQuestions: relatedQuestions.length > 0 ? relatedQuestions : undefined,
         processingTime: Date.now() - overallStartTime,
         retrieval: {
-          chunksFound: allCitations.size,
-          chunksUsed: finalCitations.length,
-          retrievalTime: totalRetrievalTime,
-          method: this.retriever.name,
+            chunksFound: allCitations.size,
+            chunksUsed: finalCitations.length,
+            retrievalTime: totalRetrievalTime,
+            method: retrievalMethod,
           scopeDetails: {
             tenantId: effectiveScope.tenantId,
             categoryIds: effectiveScope.categoryIds,
