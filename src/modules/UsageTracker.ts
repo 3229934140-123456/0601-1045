@@ -41,6 +41,7 @@ export class UsageTracker {
       tokens?: number;
       duration?: number;
       success?: boolean;
+      errorMessage?: string;
     } = {}
   ): UsageRecord {
     const record: UsageRecord = {
@@ -54,6 +55,7 @@ export class UsageTracker {
       tokens: options.tokens,
       duration: options.duration,
       success: options.success !== undefined ? options.success : true,
+      errorMessage: options.errorMessage,
     };
 
     this.records.push(record);
@@ -185,7 +187,7 @@ export class UsageTracker {
 
     return feedbacks
       .filter(feedback => {
-        if (feedback.rating >= threshold) {
+        if (feedback.rating > threshold) {
           return false;
         }
 
@@ -212,6 +214,7 @@ export class UsageTracker {
         let question = '';
         let answer = '';
         const citations: string[] = feedback.citations || [];
+        let citationDetails: LowScoreAnswerExport['citationDetails'] = [];
 
         if (session) {
           const messages = session.messages;
@@ -219,6 +222,16 @@ export class UsageTracker {
             if (messages[i].questionId === feedback.questionId) {
               if (messages[i].role === 'assistant') {
                 answer = messages[i].content;
+                if (messages[i].citations) {
+                  citationDetails = messages[i].citations!.map(c => ({
+                    id: c.id,
+                    content: c.content,
+                    categoryId: c.categoryId,
+                    tenantId: c.tenantId,
+                    tags: c.tags,
+                    relevance: c.relevance,
+                  }));
+                }
                 if (i > 0 && messages[i - 1].role === 'user') {
                   question = messages[i - 1].content;
                 }
@@ -226,6 +239,16 @@ export class UsageTracker {
                 question = messages[i].content;
                 if (i + 1 < messages.length && messages[i + 1].role === 'assistant') {
                   answer = messages[i + 1].content;
+                  if (messages[i + 1].citations) {
+                    citationDetails = messages[i + 1].citations!.map(c => ({
+                      id: c.id,
+                      content: c.content,
+                      categoryId: c.categoryId,
+                      tenantId: c.tenantId,
+                      tags: c.tags,
+                      relevance: c.relevance,
+                    }));
+                  }
                 }
               }
               break;
@@ -243,6 +266,7 @@ export class UsageTracker {
           helpful: feedback.helpful,
           comment: feedback.comment,
           citations,
+          citationDetails,
           createdAt: new Date(feedback.createdAt).toISOString(),
         };
       })
@@ -325,6 +349,10 @@ export class UsageTracker {
 
     const total = records.reduce((sum, r) => sum + (r.duration || 0), 0);
     return total / records.length;
+  }
+
+  exportUsageDetail(request: UsageQueryRequest = {}): UsageRecord[] {
+    return this.query(request);
   }
 
   clearOldRecords(beforeTimestamp: number): number {

@@ -286,6 +286,7 @@ export interface UsageRecord {
   tokens?: number;
   duration?: number;
   success: boolean;
+  errorMessage?: string;
 }
 
 export interface UsageQueryRequest {
@@ -406,6 +407,16 @@ export interface AIPlatformConfig {
   };
 }
 
+export interface RebuildResult {
+  totalChunks: number;
+  totalDocuments: number;
+  affectedChunks: number;
+  affectedDocuments: number;
+  retrievalUpdated: boolean;
+  faqUpdated: boolean;
+  duration: number;
+}
+
 export interface LowScoreAnswerExport {
   feedbackId: string;
   questionId: string;
@@ -416,5 +427,15 @@ export interface LowScoreAnswerExport {
   helpful: boolean;
   comment?: string;
   citations: string[];
+  citationDetails: Array<{
+    id: string;
+    content: string;
+    categoryId: string;
+    categoryName?: string;
+    tenantId: string;
+    tags: string[];
+    tagNames?: string[];
+    relevance: number;
+  }>;
   createdAt: string;
 }

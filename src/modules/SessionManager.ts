@@ -313,10 +313,23 @@ export class SessionManager {
 
   exportLowScoreAnswers(
     maxRating: number = 3,
-    userId?: string
+    options: {
+      userId?: string;
+      tenantId?: string;
+      startDate?: number;
+      endDate?: number;
+    } = {}
   ): LowScoreAnswerExport[] {
+    const { userId, tenantId, startDate, endDate } = options;
+
     const lowScoreFeedbacks = this.getFeedbacks(undefined, userId).filter(
-      f => f.rating <= maxRating
+      f => {
+        if (f.rating > maxRating) return false;
+        if (tenantId && f.tenantId !== tenantId) return false;
+        if (startDate && f.createdAt < startDate) return false;
+        if (endDate && f.createdAt > endDate) return false;
+        return true;
+      }
     );
 
     const result: LowScoreAnswerExport[] = [];
@@ -328,6 +341,7 @@ export class SessionManager {
       let question = '';
       let answer = '';
       const citationIds: string[] = feedback.citations || [];
+      let citationDetails: LowScoreAnswerExport['citationDetails'] = [];
 
       for (let i = 0; i < session.messages.length; i++) {
         const msg = session.messages[i];
@@ -335,10 +349,31 @@ export class SessionManager {
           if (msg.role === 'user') {
             question = msg.content;
             if (i + 1 < session.messages.length && session.messages[i + 1].questionId === feedback.questionId) {
-              answer = session.messages[i + 1].content;
+              const assistantMsg = session.messages[i + 1];
+              answer = assistantMsg.content;
+              if (assistantMsg.citations) {
+                citationDetails = assistantMsg.citations.map(c => ({
+                  id: c.id,
+                  content: c.content,
+                  categoryId: c.categoryId,
+                  tenantId: c.tenantId,
+                  tags: c.tags,
+                  relevance: c.relevance,
+                }));
+              }
             }
           } else if (msg.role === 'assistant') {
             answer = msg.content;
+            if (msg.citations) {
+              citationDetails = msg.citations.map(c => ({
+                id: c.id,
+                content: c.content,
+                categoryId: c.categoryId,
+                tenantId: c.tenantId,
+                tags: c.tags,
+                relevance: c.relevance,
+              }));
+            }
             if (i > 0 && session.messages[i - 1].questionId === feedback.questionId) {
               question = session.messages[i - 1].content;
             }
@@ -357,6 +392,7 @@ export class SessionManager {
         helpful: feedback.helpful,
         comment: feedback.comment,
         citations: citationIds,
+        citationDetails,
         createdAt: new Date(feedback.createdAt).toISOString(),
       });
     }

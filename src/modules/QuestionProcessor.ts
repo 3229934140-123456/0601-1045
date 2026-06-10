@@ -462,4 +462,54 @@ export class QuestionProcessor {
   getPairById(questionId: string): QAPair | undefined {
     return this.qaPairs.find(p => p.id === questionId);
   }
+
+  rebuildFromFAQs(faqs: FAQItem[]): void {
+    const existingIds = new Set(this.qaPairs.map(p => p.id));
+
+    for (const faq of faqs) {
+      if (existingIds.has(faq.id)) {
+        const pair = this.qaPairs.find(p => p.id === faq.id);
+        if (pair) {
+          pair.question = faq.question;
+          pair.answer = faq.answer;
+          pair.category = faq.categoryId;
+          pair.categoryId = faq.categoryId;
+          pair.tenantId = faq.tenantId;
+          pair.tags = faq.tags;
+          pair.normalizedQuestion = normalizeText(faq.question);
+          pair.usageCount = faq.usageCount;
+          pair.directQuestionCount = faq.directQuestionCount;
+          pair.similarMatchCount = faq.similarMatchCount;
+          pair.pinned = faq.pinned;
+          pair.pinnedWeight = faq.pinnedWeight;
+          pair.lastUsedAt = faq.lastUsedAt;
+          pair.updatedAt = faq.updatedAt;
+        }
+      } else {
+        const pair: QAPair = {
+          id: faq.id,
+          question: faq.question,
+          answer: faq.answer,
+          category: faq.categoryId,
+          categoryId: faq.categoryId,
+          tenantId: faq.tenantId,
+          tags: faq.tags,
+          normalizedQuestion: normalizeText(faq.question),
+          usageCount: faq.usageCount,
+          directQuestionCount: faq.directQuestionCount,
+          similarMatchCount: faq.similarMatchCount,
+          pinned: faq.pinned,
+          pinnedWeight: faq.pinnedWeight,
+          lastUsedAt: faq.lastUsedAt,
+          createdAt: faq.createdAt,
+          updatedAt: faq.updatedAt,
+        };
+        this.qaPairs.push(pair);
+      }
+    }
+  }
+
+  clearQA(): void {
+    this.qaPairs = [];
+  }
 }

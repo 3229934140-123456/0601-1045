@@ -1,4 +1,4 @@
-import { AIPlatformConfig, UsageType } from '../types';
+import { AIPlatformConfig, UsageType, RebuildResult } from '../types';
 export * from '../types';
 
 import { DocumentManager } from './DocumentManager';
@@ -87,6 +87,11 @@ export class AIPlatform {
     await this.document.initialize();
     await this.session.initialize(this.defaultTenantId, this.defaultUserId);
     await this.usage.initialize(this.defaultTenantId);
+
+    const allFAQs = this.session.listFAQ();
+    if (allFAQs.length > 0) {
+      this.question.rebuildFromFAQs(allFAQs);
+    }
   }
 
   setDefaultUserId(userId: string): void {
@@ -113,6 +118,7 @@ export class AIPlatform {
     tokens?: number;
     duration?: number;
     success?: boolean;
+    errorMessage?: string;
   } = {}): void {
     const userId = extra.userId || this.resolveUserId(extra.sessionId);
     this.usage.record(type, {
@@ -123,6 +129,7 @@ export class AIPlatform {
       tokens: extra.tokens,
       duration: extra.duration,
       success: extra.success,
+      errorMessage: extra.errorMessage,
     });
   }
 
@@ -467,16 +474,22 @@ export class AIPlatform {
     endDate?: number;
     threshold?: number;
   } = {}): LowScoreAnswerExport[] {
-    const feedbacks = this.session.getFeedbacks(undefined, options.userId);
-    const getSession = (sessionId: string) => this.session.getSession(sessionId);
-    
-    const finalOptions = {
-      ...options,
-      tenantId: options.tenantId || this.defaultTenantId,
-      userId: options.userId || this.defaultUserId,
-    };
-    
-    return this.usage.getLowScoreFeedbacks(feedbacks, getSession, finalOptions);
+    const threshold = options.threshold ?? 3;
+    const exports = this.session.exportLowScoreAnswers(threshold, {
+      userId: options.userId,
+      tenantId: options.tenantId,
+      startDate: options.startDate,
+      endDate: options.endDate,
+    });
+
+    for (const item of exports) {
+      for (const cit of item.citationDetails) {
+        cit.categoryName = this.document.getCategoryName(cit.categoryId);
+        cit.tagNames = cit.tags.map(t => this.document.getTagName(t)).filter(Boolean) as string[];
+      }
+    }
+
+    return exports;
   }
 
   getUsageCountByDimensions(
@@ -484,6 +497,89 @@ export class AIPlatform {
     request: UsageQueryRequest = {}
   ): Record<string, number> {
     return this.usage.getCountByDimensions(dimensions, request);
+  }
+
+  exportUsageDetail(request: UsageQueryRequest = {}): UsageRecord[] {
+    const effectiveRequest: UsageQueryRequest = { ...request };
+    if (!effectiveRequest.tenantId && this.defaultTenantId) {
+      effectiveRequest.tenantId = this.defaultTenantId;
+    }
+    return this.usage.exportUsageDetail(effectiveRequest);
+  }
+
+  async rebuildKnowledgeBase(scope?: {
+    tenantId?: string;
+    categoryIds?: string[];
+    tagIds?: string[];
+  }): Promise<RebuildResult> {
+    const startTime = Date.now();
+    const effectiveTenantId = scope?.tenantId || this.defaultTenantId;
+
+    const allChunks = this.document.getAllChunks(effectiveTenantId);
+    const totalChunks = allChunks.length;
+    const totalDocuments = new Set(allChunks.map(c => c.metadata?.documentId || c.id)).size;
+
+    let affectedChunks = allChunks;
+    if (scope?.categoryIds && scope.categoryIds.length > 0) {
+      affectedChunks = allChunks.filter(c => scope.categoryIds!.includes(c.categoryId));
+    }
+    if (scope?.tagIds && scope.tagIds.length > 0) {
+      affectedChunks = affectedChunks.filter(c =>
+        scope.tagIds!.some(tid => c.tags.includes(tid))
+      );
+    }
+
+    const affectedDocuments = new Set(
+      affectedChunks.map(c => c.metadata?.documentId || c.id)
+    ).size;
+
+    this.document.rebuildChunkIndex();
+
+    let retrievalUpdated = false;
+    try {
+      if ((this.answer as any).retriever && (this.answer as any).retriever.addChunks) {
+        await (this.answer as any).retriever.clear(effectiveTenantId);
+        await (this.answer as any).retriever.addChunks(affectedChunks);
+        retrievalUpdated = true;
+      }
+    } catch (_e) {
+      // retrieval rebuild failure is non-critical
+    }
+
+    let faqUpdated = false;
+    try {
+      const faqs = this.session.listFAQ(undefined, effectiveTenantId);
+      if (faqs.length > 0) {
+        this.question.rebuildFromFAQs(faqs);
+        faqUpdated = true;
+      }
+    } catch (_e) {
+      // FAQ rebuild failure is non-critical
+    }
+
+    const duration = Date.now() - startTime;
+
+    return {
+      totalChunks,
+      totalDocuments,
+      affectedChunks: affectedChunks.length,
+      affectedDocuments,
+      retrievalUpdated,
+      faqUpdated,
+      duration,
+    };
+  }
+
+  moveChunk(chunkId: string, newCategoryId: string, tenantId?: string): boolean {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return false;
+    return this.document.moveChunk(chunkId, newCategoryId, effectiveTenantId);
+  }
+
+  updateChunkTags(chunkId: string, newTags: string[], tenantId?: string): boolean {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return false;
+    return this.document.updateChunkTags(chunkId, newTags, effectiveTenantId);
   }
 
   // ==================== 便捷集成 ====================

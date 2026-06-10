@@ -499,14 +499,23 @@ async function main() {
   });
   console.log('已提交反馈3：评分1星（差评）');
 
-  const lowScoreAnswers = platform.session.exportLowScoreAnswers(3, 'user_001');
-  console.log('\n低分答案导出（评分<=3）：');
+  const lowScoreAnswers = platform.getLowScoreFeedbacks({
+    tenantId: tenant1.id,
+    userId: 'user_001',
+    threshold: 3,
+  });
+  console.log('\n低分答案导出（评分<=3，按租户+用户筛选）：');
   lowScoreAnswers.forEach((item, i) => {
     console.log(`  ${i + 1}. 评分：${item.rating}星，有用：${item.helpful ? '是' : '否'}`);
     console.log(`     问题：${item.question}`);
     console.log(`     答案：${item.answer.slice(0, 80)}...`);
     if (item.comment) console.log(`     备注：${item.comment}`);
-    console.log(`     引用：${item.citations.length}段`);
+    console.log(`     引用：${item.citationDetails.length}段`);
+    if (item.citationDetails.length > 0) {
+      const firstCit = item.citationDetails[0];
+      console.log(`       第1段引用：栏目=[${firstCit.categoryName || '-'}] 标签=[${firstCit.tagNames?.join(',') || '-'}] 相关度=${firstCit.relevance.toFixed(2)}`);
+      console.log(`       原文片段：${firstCit.content.slice(0, 60)}...`);
+    }
   });
 
   // ==================== 7. 多维用量查询 ====================
@@ -559,6 +568,19 @@ async function main() {
     console.log(`  ${key}：${count}次`);
   }
 
+  const usageDetail = platform.exportUsageDetail({
+    tenantId: tenant1.id,
+    type: 'answer_generate',
+  });
+  console.log(`\n租户${tenant1.name}的答案生成调用明细（${usageDetail.length}条）：`);
+  usageDetail.slice(0, 3).forEach((record, i) => {
+    console.log(`  ${i + 1}. 类型=${record.type} 用户=${record.userId || '-'} 会话=${record.sessionId?.slice(0, 12) || '-'}...`);
+    console.log(`     耗时=${record.duration?.toFixed(0) || '-'}ms tokens=${record.tokens || 0} 成功=${record.success ? '是' : '否'}`);
+    if (record.errorMessage) {
+      console.log(`     失败原因：${record.errorMessage}`);
+    }
+  });
+
   // ==================== 8. 多轮对话追问（自动沿用会话scope） ====================
   console.log('\n' + '='.repeat(80));
   console.log('[8] 多轮对话追问（会话scope自动沿用）');
@@ -598,9 +620,43 @@ async function main() {
     console.log(`  [${m.role}] ${m.content.slice(0, 60)}...`);
   });
 
-  // ==================== 9. 存储适配器 - 数据持久化验证 ====================
+  // ==================== 9. 知识库重建能力 ====================
   console.log('\n' + '='.repeat(80));
-  console.log('[9] 存储适配器 - 数据持久化验证');
+  console.log('[9] 知识库重建能力（上传/删除/移动/改标签后重建索引）');
+  console.log('='.repeat(80));
+
+  const rebuildBefore = await platform.rebuildKnowledgeBase({ tenantId: tenant1.id });
+  console.log(`首次全量重建（${tenant1.name}）：`);
+  console.log(`  总分块：${rebuildBefore.totalChunks}块，总文档：${rebuildBefore.totalDocuments}个`);
+  console.log(`  影响分块：${rebuildBefore.affectedChunks}块，影响文档：${rebuildBefore.affectedDocuments}个`);
+  console.log(`  检索器更新：${rebuildBefore.retrievalUpdated ? '是' : '否'}，FAQ更新：${rebuildBefore.faqUpdated ? '是' : '否'}`);
+  console.log(`  重建耗时：${rebuildBefore.duration}ms`);
+
+  const newDoc = await platform.uploadDocument({
+    content: '企业愿景：成为全球领先的AI解决方案提供商。企业使命：用AI赋能每一个组织。',
+    tenantId: tenant1.id,
+    categoryId: catProduct!.id,
+    tags: [tagImportant!.id],
+  });
+  console.log(`\n上传新文档（产品中心）：成功，分块数=${newDoc.chunkCount}`);
+
+  const rebuildAfterAdd = await platform.rebuildKnowledgeBase({ tenantId: tenant1.id });
+  console.log(`上传后重建：总分块=${rebuildAfterAdd.totalChunks}块（+${rebuildAfterAdd.totalChunks - rebuildBefore.totalChunks}）`);
+
+  if (newDoc.chunkIds.length > 0) {
+    const moved = platform.moveChunk(newDoc.chunkIds[0], catHr!.id, tenant1.id);
+    console.log(`移动分块到人事制度分类：${moved ? '成功' : '失败'}`);
+
+    const rebuildAfterMove = await platform.rebuildKnowledgeBase({
+      tenantId: tenant1.id,
+      categoryIds: [catHr!.id],
+    });
+    console.log(`按分类重建（人事制度）：影响分块=${rebuildAfterMove.affectedChunks}块`);
+  }
+
+  // ==================== 10. 存储适配器 - 数据持久化验证 ====================
+  console.log('\n' + '='.repeat(80));
+  console.log('[10] 存储适配器 - 数据持久化验证');
   console.log('='.repeat(80));
 
   console.log('当前存储适配器中的数据量：');
@@ -622,9 +678,9 @@ async function main() {
   console.log(`  FAQ：${savedFAQs.length}条`);
   console.log(`  用量记录：${savedUsage.length}条`);
 
-  // ==================== 10. 新实例恢复验证 ====================
+  // ==================== 11. 新实例恢复验证 ====================
   console.log('\n' + '='.repeat(80));
-  console.log('[10] 新实例从存储适配器恢复数据');
+  console.log('[11] 新实例从存储适配器恢复数据');
   console.log('='.repeat(80));
 
   const platform2 = new AIPlatform({
@@ -661,7 +717,7 @@ async function main() {
   console.log(`\n数据完整性检查：${dataIntact ? '通过（所有数据一致）' : '存在差异，请检查'}`);
 
   if (restoredChunkCount > 0) {
-    console.log('\n使用恢复后的数据提问验证：');
+    console.log('\n[验证1] 使用恢复后的数据提问：');
     const restoredAnswer = await platform2.ask('年假有多少天？', {
       scope: { tenantId: tenant1.id, categoryIds: [catHr!.id], strictMode: true, includeSubCategories: true },
     });
@@ -669,6 +725,48 @@ async function main() {
     console.log(`  回答：${restoredAnswer.answer.slice(0, 100)}...`);
     console.log(`  引用：${restoredAnswer.citations.length}段`);
     console.log(`  检索方式：${restoredAnswer.retrieval?.method}`);
+  }
+
+  console.log('\n[验证2] 恢复后FAQ推荐：');
+  const restoredFAQs = platform2.recommendFAQ({ tenantId: tenant1.id, limit: 3 });
+  console.log(`  推荐FAQ数量：${restoredFAQs.length}条`);
+  restoredFAQs.forEach((faq, i) => {
+    console.log(`  ${i + 1}. ${faq.question}（使用${faq.usageCount}次）`);
+  });
+
+  console.log('\n[验证3] 恢复后相似问题查询：');
+  const similarResult = platform2.findSimilarQuestions({
+    question: '年假有多少天？',
+    topK: 3,
+    threshold: 0.5,
+    scope: { tenantId: tenant1.id, strictMode: false },
+  });
+  console.log(`  候选相似问题数：${similarResult.candidates.length}个`);
+  if (similarResult.candidates.length > 0) {
+    console.log(`  最佳匹配：${similarResult.candidates[0].question}（相似度${similarResult.candidates[0].similarity.toFixed(2)}）`);
+  }
+
+  console.log('\n[验证4] 恢复后低分答案导出：');
+  const restoredLowScore = platform2.getLowScoreFeedbacks({
+    tenantId: tenant1.id,
+    threshold: 3,
+  });
+  console.log(`  低分反馈数：${restoredLowScore.length}条`);
+  if (restoredLowScore.length > 0) {
+    const firstLow = restoredLowScore[0];
+    console.log(`  第1条：评分=${firstLow.rating}星，问题="${firstLow.question.slice(0, 30)}..."`);
+    console.log(`  引用详情：${firstLow.citationDetails.length}段`);
+  }
+
+  console.log('\n[验证5] 恢复后调用明细导出：');
+  const restoredDetail = platform2.exportUsageDetail({
+    tenantId: tenant1.id,
+    type: 'answer_generate',
+  });
+  console.log(`  答案生成调用次数：${restoredDetail.length}次`);
+  if (restoredDetail.length > 0) {
+    const firstRec = restoredDetail[0];
+    console.log(`  第1条：用户=${firstRec.userId}，成功=${firstRec.success}，耗时=${firstRec.duration}ms`);
   }
 
   console.log('\n' + '='.repeat(80));
@@ -685,11 +783,14 @@ async function main() {
   console.log('  [8] 详细处理追踪（每步耗时、tokens、命中情况）');
   console.log('  [9] FAQ综合排序（置顶*0.4 + 直接提问*0.3 + 相似命中*0.2）');
   console.log('  [10] 用户反馈（关联answerId和citationIds）');
-  console.log('  [11] 低分答案导出（含问题、答案、引用段落）');
+  console.log('  [11] 低分答案导出（含问题、答案、引用原文、栏目、标签、相关度）');
   console.log('  [12] 多维用量查询（租户/用户/会话/接口类型/日期）');
   console.log('  [13] 用量正确归因（会话userId自动关联，不乱记默认用户）');
   console.log('  [14] 会话scope沿用（追问时自动沿用创建时的知识范围）');
   console.log('  [15] 存储适配器（保存→新建实例→恢复完整验证）');
+  console.log('  [16] 知识库重建（上传/删除/移动栏目/改标签后重建索引）');
+  console.log('  [17] 调用明细导出（接口类型/用户/会话/耗时/tokens/成功失败/原因）');
+  console.log('  [18] 存储恢复后FAQ/相似问答/低分反馈完整可用');
 }
 
 main().catch(console.error);

@@ -668,4 +668,106 @@ export class DocumentManager {
   setDefaultTenantId(tenantId: string): void {
     this.defaultTenantId = tenantId;
   }
+
+  moveChunk(chunkId: string, newCategoryId: string, tenantId: string): boolean {
+    const chunk = this.chunks.get(chunkId);
+    if (!chunk || chunk.tenantId !== tenantId) return false;
+
+    const newCategory = this.categories.get(newCategoryId);
+    if (!newCategory || newCategory.tenantId !== tenantId) return false;
+
+    const oldCategoryId = chunk.categoryId;
+
+    const oldCatChunks = this.chunkIndex.get(oldCategoryId);
+    if (oldCatChunks) {
+      const idx = oldCatChunks.indexOf(chunkId);
+      if (idx > -1) oldCatChunks.splice(idx, 1);
+    }
+
+    const newCatChunks = this.chunkIndex.get(newCategoryId) || [];
+    if (!newCatChunks.includes(chunkId)) {
+      newCatChunks.push(chunkId);
+      this.chunkIndex.set(newCategoryId, newCatChunks);
+    }
+
+    chunk.categoryId = newCategoryId;
+    chunk.updatedAt = Date.now();
+
+    this.persist();
+    return true;
+  }
+
+  updateChunkTags(chunkId: string, newTags: string[], tenantId: string): boolean {
+    const chunk = this.chunks.get(chunkId);
+    if (!chunk || chunk.tenantId !== tenantId) return false;
+
+    const validTags: string[] = [];
+    for (const tagId of newTags) {
+      if (this.tags.has(tagId) && this.tags.get(tagId)!.tenantId === tenantId) {
+        validTags.push(tagId);
+      }
+    }
+
+    for (const oldTagId of chunk.tags) {
+      const tagChunks = this.tagChunkIndex.get(oldTagId);
+      if (tagChunks) {
+        const idx = tagChunks.indexOf(chunkId);
+        if (idx > -1) tagChunks.splice(idx, 1);
+      }
+    }
+
+    for (const newTagId of validTags) {
+      const tagChunks = this.tagChunkIndex.get(newTagId) || [];
+      if (!tagChunks.includes(chunkId)) {
+        tagChunks.push(chunkId);
+        this.tagChunkIndex.set(newTagId, tagChunks);
+      }
+    }
+
+    chunk.tags = validTags;
+    chunk.updatedAt = Date.now();
+
+    this.persist();
+    return true;
+  }
+
+  getCategoryName(categoryId: string): string | undefined {
+    return this.categories.get(categoryId)?.name;
+  }
+
+  getTagName(tagId: string): string | undefined {
+    return this.tags.get(tagId)?.name;
+  }
+
+  getAllChunks(tenantId?: string): DocumentChunk[] {
+    let chunks = Array.from(this.chunks.values());
+    if (tenantId) {
+      chunks = chunks.filter(c => c.tenantId === tenantId);
+    }
+    return chunks;
+  }
+
+  rebuildChunkIndex(): void {
+    this.chunkIndex.clear();
+    this.tagChunkIndex.clear();
+
+    for (const category of this.categories.values()) {
+      this.chunkIndex.set(category.id, []);
+    }
+    for (const tag of this.tags.values()) {
+      this.tagChunkIndex.set(tag.id, []);
+    }
+
+    for (const chunk of this.chunks.values()) {
+      const catChunks = this.chunkIndex.get(chunk.categoryId) || [];
+      catChunks.push(chunk.id);
+      this.chunkIndex.set(chunk.categoryId, catChunks);
+
+      for (const tagId of chunk.tags) {
+        const tagChunks = this.tagChunkIndex.get(tagId) || [];
+        tagChunks.push(chunk.id);
+        this.tagChunkIndex.set(tagId, tagChunks);
+      }
+    }
+  }
 }
