@@ -13,6 +13,9 @@ import {
   DocumentUploadResult,
   DocumentChunk,
   Category,
+  Tenant,
+  Tag,
+  KnowledgeScope,
   QuestionRewriteRequest,
   QuestionRewriteResult,
   SimilarQuestionRequest,
@@ -32,7 +35,9 @@ import {
   UsageSummary,
   UsageRecord,
   SensitiveCheckResult,
+  LowScoreAnswerExport,
 } from '../types';
+import { DimensionKey } from './UsageTracker';
 
 export class AIPlatform {
   public document: DocumentManager;
@@ -44,9 +49,12 @@ export class AIPlatform {
 
   private config: AIPlatformConfig;
   private defaultUserId?: string;
+  private defaultTenantId?: string;
 
   constructor(config: AIPlatformConfig = {}) {
     this.config = config;
+    this.defaultTenantId = config.tenantId;
+    this.defaultUserId = config.defaultUserId;
 
     this.sensitive = new SensitiveWordFilter(config.sensitiveWords);
     this.document = new DocumentManager();
@@ -54,7 +62,7 @@ export class AIPlatform {
     this.usage = new UsageTracker();
     this.session = new SessionManager(
       this.question,
-      config.maxHistoryLength || 20
+      config
     );
     this.answer = new AnswerGenerator(
       this.document,
@@ -63,6 +71,7 @@ export class AIPlatform {
       {
         noAnswerMessage: config.noAnswerMessage,
         blockedMessage: config.blockedMessage,
+        scopeEmptyMessage: config.scopeEmptyMessage,
       }
     );
 
@@ -75,58 +84,128 @@ export class AIPlatform {
     this.defaultUserId = userId;
   }
 
+  setDefaultTenantId(tenantId: string): void {
+    this.defaultTenantId = tenantId;
+  }
+
   private recordUsage(type: UsageType, extra: {
+    tenantId?: string;
     sessionId?: string;
     metadata?: Record<string, any>;
     tokens?: number;
     duration?: number;
+    success?: boolean;
   } = {}): void {
     this.usage.record(type, {
+      tenantId: extra.tenantId || this.defaultTenantId,
       userId: this.defaultUserId,
       sessionId: extra.sessionId,
       metadata: extra.metadata,
       tokens: extra.tokens,
       duration: extra.duration,
+      success: extra.success,
     });
+  }
+
+  // ==================== 0. 租户 & 标签管理 ====================
+
+  addTenant(name: string, description?: string): Tenant | null {
+    return this.document.addTenant(name, description);
+  }
+
+  listTenants(onlyActive: boolean = true): Tenant[] {
+    return this.document.listTenants(onlyActive);
+  }
+
+  getTenant(tenantId: string): Tenant | undefined {
+    return this.document.getTenant(tenantId);
+  }
+
+  removeTenant(tenantId: string): boolean {
+    return this.document.removeTenant(tenantId);
+  }
+
+  addTag(name: string, tenantId?: string, color?: string): Tag | null {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return null;
+    return this.document.addTag(name, effectiveTenantId, color);
+  }
+
+  listTags(tenantId?: string): Tag[] {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return [];
+    return this.document.listTags(effectiveTenantId);
+  }
+
+  getTag(tagId: string, tenantId?: string): Tag | undefined {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return undefined;
+    return this.document.getTag(tagId, effectiveTenantId);
+  }
+
+  removeTag(tagId: string, tenantId?: string): boolean {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return false;
+    return this.document.removeTag(tagId, effectiveTenantId);
   }
 
   // ==================== 1. 文档整理 ====================
 
-  addCategory(name: string, parentId?: string, description?: string): Category {
-    return this.document.addCategory(name, parentId, description);
+  addCategory(name: string, tenantId?: string, parentId?: string, description?: string): Category | null {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return null;
+    return this.document.addCategory(name, effectiveTenantId, parentId, description);
   }
 
-  removeCategory(categoryId: string): boolean {
-    return this.document.removeCategory(categoryId);
+  removeCategory(categoryId: string, tenantId?: string): boolean {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return false;
+    return this.document.removeCategory(categoryId, effectiveTenantId);
   }
 
-  listCategories(): Category[] {
-    return this.document.listCategories();
+  listCategories(tenantId?: string): Category[] {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return [];
+    return this.document.listCategories(effectiveTenantId);
   }
 
-  uploadDocument(request: DocumentUploadRequest): DocumentUploadResult {
-    const result = this.document.uploadDocument(request);
+  async uploadDocument(request: DocumentUploadRequest): Promise<DocumentUploadResult> {
+    const result = await this.document.uploadDocument(request);
     this.recordUsage('document_upload', {
-      metadata: { category: request.category, chunks: result.chunkCount },
+      tenantId: request.tenantId,
+      metadata: { categoryId: request.categoryId, chunks: result.chunkCount },
       tokens: request.content.length,
+      success: result.success,
     });
     return result;
   }
 
-  removeChunk(chunkId: string): boolean {
-    return this.document.removeChunk(chunkId);
+  removeChunk(chunkId: string, tenantId?: string): boolean {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return false;
+    return this.document.removeChunk(chunkId, effectiveTenantId);
   }
 
-  getChunk(chunkId: string): DocumentChunk | undefined {
-    return this.document.getChunk(chunkId);
+  getChunk(chunkId: string, tenantId?: string): DocumentChunk | undefined {
+    const effectiveTenantId = tenantId || this.defaultTenantId;
+    if (!effectiveTenantId) return undefined;
+    return this.document.getChunk(chunkId, effectiveTenantId);
   }
 
-  listChunks(categories?: string[], limit?: number): DocumentChunk[] {
-    return this.document.listChunks(categories, limit);
+  listChunks(scope?: KnowledgeScope, limit?: number): DocumentChunk[] {
+    const effectiveScope: KnowledgeScope = scope || {
+      tenantId: this.defaultTenantId,
+      strictMode: false,
+    };
+    return this.document.listChunks(effectiveScope, limit);
   }
 
-  getChunkCount(categories?: string[]): number {
-    return this.document.getChunkCount(categories);
+  getChunkCount(scope?: KnowledgeScope): number {
+    const effectiveScope: KnowledgeScope = scope || {
+      tenantId: this.defaultTenantId,
+      strictMode: false,
+    };
+    return this.document.getChunkCount(effectiveScope);
   }
 
   clearCategory(categoryId: string): number {
@@ -163,10 +242,14 @@ export class AIPlatform {
 
   async generateAnswer(request: AnswerGenerateRequest): Promise<AnswerGenerateResult> {
     let sessionId = request.sessionId;
+    let tenantId = request.scope?.tenantId || this.defaultTenantId;
+
     if (!sessionId || !this.session.hasSession(sessionId)) {
       const session = this.session.createSession({
+        tenantId,
         userId: this.defaultUserId,
-        category: request.categories?.[0],
+        categoryId: request.scope?.categoryIds?.[0],
+        scope: request.scope,
       });
       sessionId = session.id;
       request = { ...request, sessionId };
@@ -190,13 +273,17 @@ export class AIPlatform {
     const result = await this.answer.generate(request);
     const duration = Date.now() - startTime;
 
-    this.session.addMessage(sessionId, 'assistant', result.answer, result.citations);
+    this.session.addMessage(sessionId, 'assistant', result.answer, result.citations, result.questionId, result.status);
+
+    const session = this.session.getSession(sessionId);
 
     this.recordUsage('answer_generate', {
+      tenantId: session?.tenantId,
       sessionId: result.sessionId,
       metadata: { status: result.status, citations: result.citations.length },
-      tokens: result.answer.length + request.question.length,
+      tokens: result.llm ? result.llm.tokensInput + result.llm.tokensOutput : result.answer.length + request.question.length,
       duration,
+      success: result.status === 'success',
     });
 
     return result;
@@ -212,12 +299,18 @@ export class AIPlatform {
 
   // ==================== 4. 引用返回 ====================
 
-  getCitations(question: string, categories?: string[], limit: number = 5): CitationChunk[] {
-    const searchResults = this.document.searchChunks(question, categories, limit);
+  getCitations(question: string, scope?: KnowledgeScope, limit: number = 5): CitationChunk[] {
+    const effectiveScope: KnowledgeScope = scope || {
+      tenantId: this.defaultTenantId,
+      strictMode: false,
+    };
+    const searchResults = this.document.searchChunks(question, effectiveScope, limit);
     return searchResults.map(item => ({
       id: item.chunk.id,
       content: item.chunk.content,
-      category: item.chunk.category,
+      categoryId: item.chunk.categoryId,
+      tenantId: item.chunk.tenantId,
+      tags: item.chunk.tags,
       relevance: item.score,
       metadata: item.chunk.metadata,
     }));
@@ -228,6 +321,9 @@ export class AIPlatform {
   createSession(request: SessionCreateRequest = {}): Session {
     if (!request.userId && this.defaultUserId) {
       request = { ...request, userId: this.defaultUserId };
+    }
+    if (!request.tenantId && this.defaultTenantId) {
+      request = { ...request, tenantId: this.defaultTenantId };
     }
     return this.session.createSession(request);
   }
@@ -257,11 +353,14 @@ export class AIPlatform {
   }
 
   submitFeedback(request: FeedbackSubmitRequest): UserFeedback | null {
-    const result = this.session.submitFeedback(request);
+    const result = this.session.submitFeedback(request, this.defaultUserId);
     if (result) {
+      const session = this.session.getSession(request.sessionId);
       this.recordUsage('feedback_submit', {
+        tenantId: session?.tenantId,
         sessionId: request.sessionId,
         metadata: { rating: request.rating, helpful: request.helpful },
+        success: true,
       });
     }
     return result;
@@ -288,9 +387,17 @@ export class AIPlatform {
   }
 
   recommendFAQ(request: FAQRecommendRequest = {}): FAQItem[] {
+    if (!request.tenantId && this.defaultTenantId) {
+      request = { ...request, tenantId: this.defaultTenantId };
+    }
+    if (!request.userId && this.defaultUserId) {
+      request = { ...request, userId: this.defaultUserId };
+    }
     const result = this.session.recommendFAQ(request);
     this.recordUsage('faq_recommend', {
+      tenantId: request.tenantId,
       metadata: { count: result.length },
+      success: true,
     });
     return result;
   }
@@ -301,12 +408,18 @@ export class AIPlatform {
     if (!request.userId && this.defaultUserId) {
       request = { ...request, userId: this.defaultUserId };
     }
+    if (!request.tenantId && this.defaultTenantId) {
+      request = { ...request, tenantId: this.defaultTenantId };
+    }
     return this.usage.query(request);
   }
 
   getUsageSummary(request: UsageQueryRequest = {}): UsageSummary {
     if (!request.userId && this.defaultUserId) {
       request = { ...request, userId: this.defaultUserId };
+    }
+    if (!request.tenantId && this.defaultTenantId) {
+      request = { ...request, tenantId: this.defaultTenantId };
     }
     return this.usage.getSummary(request);
   }
@@ -315,24 +428,59 @@ export class AIPlatform {
     return this.usage.getCount(type, userId || this.defaultUserId);
   }
 
+  getLowScoreFeedbacks(options: {
+    tenantId?: string;
+    userId?: string;
+    startDate?: number;
+    endDate?: number;
+    threshold?: number;
+  } = {}): LowScoreAnswerExport[] {
+    const feedbacks = this.session.getFeedbacks(undefined, options.userId);
+    const getSession = (sessionId: string) => this.session.getSession(sessionId);
+    
+    const finalOptions = {
+      ...options,
+      tenantId: options.tenantId || this.defaultTenantId,
+      userId: options.userId || this.defaultUserId,
+    };
+    
+    return this.usage.getLowScoreFeedbacks(feedbacks, getSession, finalOptions);
+  }
+
+  getUsageCountByDimensions(
+    dimensions: DimensionKey[],
+    request: UsageQueryRequest = {}
+  ): Record<string, number> {
+    if (!request.userId && this.defaultUserId) {
+      request = { ...request, userId: this.defaultUserId };
+    }
+    if (!request.tenantId && this.defaultTenantId) {
+      request = { ...request, tenantId: this.defaultTenantId };
+    }
+    return this.usage.getCountByDimensions(dimensions, request);
+  }
+
   // ==================== 便捷集成 ====================
 
   async ask(
     question: string,
     options: {
       sessionId?: string;
-      categories?: string[];
+      scope?: KnowledgeScope;
       useHistory?: boolean;
       answerStyle?: 'brief' | 'detailed' | 'standard';
+      traceSteps?: boolean;
+      maxCitations?: number;
     } = {}
   ): Promise<AnswerGenerateResult> {
     return this.generateAnswer({
       question,
       sessionId: options.sessionId,
-      categories: options.categories,
+      scope: options.scope,
       useHistory: options.useHistory,
       answerStyle: options.answerStyle,
-      maxCitations: 5,
+      traceSteps: options.traceSteps,
+      maxCitations: options.maxCitations || 5,
     });
   }
 }
